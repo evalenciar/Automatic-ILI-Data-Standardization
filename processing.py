@@ -379,15 +379,16 @@ class DataLoader:
                  file_path: str, 
                  OD: float, 
                  WT: float, 
-                 caliper_count: int = None,
+                 caliper_count: int | None = None,
                  value_type: str = 'absolute',
                  unit_radial: str = 'in',
                  unit_axial: str = 'ft',
                  is_column_oriented: bool = True,
-                 header_row: int = None,
-                 axial_index_col: int = None,
-                 last_column: int = None,
-                 last_row: int = None):
+                 header_row: int | None = None,
+                 skip_rows: int | None = None,
+                 axial_index_col: int | None = None,
+                 last_column: int | None = None,
+                 last_row: int | None = None):
         """
         Initialize the DataLoader with default configuration.
 
@@ -413,6 +414,8 @@ class DataLoader:
             The desired orientation is such that [rows x columns] = [axial x circumferential]. Defaults to True.
         header_row : int, optional
             Row index to use as header. If None, the header row will be detected automatically. Defaults to None.
+        skip_rows : int, optional
+            Number of rows to skip at the start of the file. Defaults to None.
         axial_index_col : int, optional
             Column index containing axial displacement values. Defaults to 0.
         last_column : int, optional
@@ -429,35 +432,45 @@ class DataLoader:
         self._unit_axial = unit_axial.lower()
         self._is_column_oriented = is_column_oriented
         self._header_row = header_row
+        self._skip_rows = skip_rows
         self._axial_index_col = axial_index_col
         self._last_column = last_column
         self._last_row = last_row
-        self._df = None
+        # self._df = None
         self._config = {}
 
         # Load data (either CSV or Excel format) without formatting
         if self._file_path.endswith('.xlsx'):
-            self._df = pd.read_excel(self._file_path, header=self._header_row, index_col=self._axial_index_col, engine='calamine')
+            self._df = pd.read_excel(self._file_path, header=self._header_row, index_col=self._axial_index_col, engine='calamine', skiprows=self._skip_rows)
         elif self._file_path.endswith('.csv'):
-            self._df = pd.read_csv(self._file_path, header=self._header_row, index_col=self._axial_index_col)
+            self._df = pd.read_csv(self._file_path, header=self._header_row, index_col=self._axial_index_col, skiprows=self._skip_rows)
         else:
             raise ValueError("Unsupported file format. Please provide a .csv or .xlsx file.")
+        
+        # Drop rows and columns if specified
+        if self._last_column is not None:
+            self._df = self._df.iloc[:, :self._last_column + 1]
+        if self._last_row is not None:
+            self._df = self._df.iloc[:self._last_row + 1, :]
         
         # Re-orient the DataFrame if is_column_oriented is False
         if not self._is_column_oriented:
             self._df = self._df.T.reset_index(drop=True)
         
         # Check if there are strings in the DataFrame header row
-        if any([isinstance(col, str) for col in self._df.columns.to_list()]):
+        if self._header_row is not None and any([isinstance(col, str) for col in self._df.columns.to_list()]):
             # Save the header row as a list that can be accessed later
             self._config['header_row'] = self._df.columns.to_list()
-            # Assign the first row (header row) as the column values and drop the first row from the DataFrame
-            self._df.columns = self._df.iloc[0]
-            self._df = self._df.drop(self._df.iloc[0]).reset_index(drop=True)
             # Check that there is no missing values in the header row. If there are, raise an error.
-            if any(["Unnamed" in col for col in self._df.columns.to_list()]):
+            if any(["Unnamed" in str(col) for col in self._df.columns.to_list()]):
                 raise ValueError("Missing values detected in the header row. Please specify the correct header_row index.")
-            
+        elif self._header_row is None and any([isinstance(col, str) for col in self._df.iloc[0].to_list()]):
+            # If header_row was not specified but there are strings in the first row, use the first row as header
+            self._config['header_row'] = self._df.iloc[0].to_list()
+            self._df.columns = self._df.iloc[0]
+            self._df = self._df.drop(self._df.index[0]).reset_index(drop=True)
+            print("Warning: Header row detected automatically. Please verify that the header_row parameter is set correctly.")
+
         # Check that the axial displacement column has no missing values. If there are, raise an error.
         if self._axial_index_col is not None and self._df.index.isna().any():
             # Trim the index to remove any leading or trailing NaN values
@@ -471,19 +484,13 @@ class DataLoader:
             raise ValueError("Non-numeric values detected in the axial displacement column. Please ensure all values are numeric.")
         if not self._df.index.is_monotonic_increasing:
             raise ValueError("Axial displacement values are not in ascending order. Please ensure the axial displacement column is sorted in ascending order.")
-
-        # Drop rows and columns if specified
-        if self._last_column is not None:
-            self._df = self._df.iloc[:, :self._last_column + 1]
-        if self._last_row is not None:
-            self._df = self._df.iloc[:self._last_row + 1, :]
         
         # Check for any missing or na values. If found, attempt to detect the shape of the DataFrame.
         if self._df.isna().any().any():
             # Warn the user that it will attempt to detect the shape of the DataFrame
             print("Warning: Missing values detected in the DataFrame. Attempting to detect the correct shape of the DataFrame.")
             self._detect_shape()
-
+        
         # Check that the current orientation is correct: [rows x columns] = [axial x circumferential]
         if self._df.shape[0] < self._df.shape[1]:
             raise ValueError("DataFrame orientation is incorrect. Please set orientation_col to True or False accordingly. There should be more axial rows than circumferential (caliper) columns.")
@@ -491,7 +498,7 @@ class DataLoader:
         # Assign axial displacement values as index
         if self._axial_index_col is None:
             # If axial_index_col is None, assume the first column is axial displacement
-            self._df.index = self._df.iloc[:, 0].astype(float)
+            self._df.index = self._df.iloc[:, 0].astype(float).index
             self._df.drop(self._df.columns[0], axis=1, inplace=True)
             # Confirm that axial displacement values are in ascending order
             if not self._df.index.is_monotonic_increasing:
@@ -512,16 +519,16 @@ class DataLoader:
         
         if self._unit_axial == 'm':
             # Convert the axial displacement index from metric to imperial
-            self._df.index = np.array([39.3701 * (x - self._df.index[0]) for x in self._df.index])   # Convert from m to relative inches (starting from 0)
+            self._df.index = pd.Index(np.array([39.3701 * (x - self._df.index[0]) for x in self._df.index]))   # Convert from m to relative inches (starting from 0)
         elif self._unit_axial == 'ft':
             # Convert the axial displacement index from feet to inches
-            self._df.index = np.array([12 * (x - self._df.index[0]) for x in self._df.index])  # Convert from ft to relative inches (starting from 0)
+            self._df.index = pd.Index(np.array([12 * (x - self._df.index[0]) for x in self._df.index]))  # Convert from ft to relative inches (starting from 0)
         elif self._unit_axial == 'mm':
             # Convert the axial displacement index from mm to inches
-            self._df.index = np.array([0.0393701 * (x - self._df.index[0]) for x in self._df.index])   # Convert from mm to relative inches (starting from 0)
+            self._df.index = pd.Index(np.array([0.0393701 * (x - self._df.index[0]) for x in self._df.index]))   # Convert from mm to relative inches (starting from 0)
         elif self._unit_axial == 'in':
             # Convert the axial displacement index from inches to relative inches
-            self._df.index = np.array([x - self._df.index[0] for x in self._df.index])   # Convert from in to relative inches (starting from 0)
+            self._df.index = pd.Index(np.array([x - self._df.index[0] for x in self._df.index]))   # Convert from in to relative inches (starting from 0)
         else:
             raise ValueError("Unsupported unit_axial. Please use either 'ft', 'm', 'mm', or 'in'.")
 
@@ -618,7 +625,10 @@ class DataLoader:
         last_row_index = len(row_lengths) - 1 - row_lengths[::-1].index(row_length)
         last_col_index = len(col_lengths) - 1 - col_lengths[::-1].index(col_length)
         # Trim the DataFrame to the detected shape
-        self._df = self._df.iloc[first_row_index:last_row_index + 1, first_col_index:last_col_index + 1].reset_index(drop=True)
+        if self._axial_index_col is None:
+            self._df = self._df.iloc[first_row_index:last_row_index + 1, first_col_index:last_col_index + 1].reset_index(drop=True)
+        else:
+            self._df = self._df.iloc[first_row_index:last_row_index + 1, first_col_index:last_col_index + 1]
         # Save the detected shape in the config
         self._config['row_range'] = [first_row_index, last_row_index]
         self._config['col_range'] = [first_col_index, last_col_index]
