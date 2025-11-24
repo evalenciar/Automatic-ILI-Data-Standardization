@@ -1,2 +1,5 @@
 /Raw Data
 /Research
+/__pycache__
+/.env
+/.venv
