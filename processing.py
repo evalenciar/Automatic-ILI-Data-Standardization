@@ -374,6 +374,256 @@ def collect_raw_data_v12(rd_path):
     rd_radius = rd.to_numpy().astype(float) / 25.4  # Convert from mm to inches
     return rd_axial, rd_circ, rd_radius
 
+class DataLoader:
+    def __init__(self, 
+                 file_path: str, 
+                 OD: float, 
+                 WT: float, 
+                 caliper_count: int = None,
+                 value_type: str = 'absolute',
+                 unit_radial: str = 'in',
+                 unit_axial: str = 'ft',
+                 is_column_oriented: bool = True,
+                 header_row: int = None,
+                 axial_index_col: int = None,
+                 last_column: int = None,
+                 last_row: int = None):
+        """
+        Initialize the DataLoader with default configuration.
+
+        Parameters
+        ----------
+        file_path : str
+            Path to the data file.
+        OD : float
+            Outside diameter measurement, in.
+        WT : float
+            Wall thickness measurement, in.
+        caliper_count : int, optional
+            Number of calipers used in the measurement. Defaults to None.
+        value_type : str, optional
+            Type of radial values: 'absolute' if the caliper measurements are the internal radius measurements, 
+            or 'relative' if the caliper measurements are the offset from the nominal internal radius. Defaults to 'absolute'. 
+        unit_radial : str, optional
+            Unit of radial measurements: 'in' for inches or 'mm' for millimeters. Defaults to 'in'.
+        unit_axial : str, optional
+            Unit of axial measurements: 'ft' for feet, 'm' for meters, 'mm' for millimeters, or 'in' for inches. Defaults to 'ft'.
+        is_column_oriented : bool, optional
+            Flag indicating if the axial displacements are in the first column (True) or first row (False). 
+            The desired orientation is such that [rows x columns] = [axial x circumferential]. Defaults to True.
+        header_row : int, optional
+            Row index to use as header. If None, the header row will be detected automatically. Defaults to None.
+        axial_index_col : int, optional
+            Column index containing axial displacement values. Defaults to 0.
+        last_column : int, optional
+            Index of the last column to read. If None, all columns will be read. Defaults to None.
+        last_row : int, optional
+            Index of the last row to read. If None, all rows will be read. Defaults to None.
+        """
+        
+        self._file_path = file_path
+        self._OD = OD
+        self._WT = WT
+        self._value_type = value_type.lower()
+        self._unit_radial = unit_radial.lower()
+        self._unit_axial = unit_axial.lower()
+        self._is_column_oriented = is_column_oriented
+        self._header_row = header_row
+        self._axial_index_col = axial_index_col
+        self._last_column = last_column
+        self._last_row = last_row
+        self._df = None
+        self._config = {}
+
+        # Load data (either CSV or Excel format) without formatting
+        if self._file_path.endswith('.xlsx'):
+            self._df = pd.read_excel(self._file_path, header=self._header_row, index_col=self._axial_index_col, engine='calamine')
+        elif self._file_path.endswith('.csv'):
+            self._df = pd.read_csv(self._file_path, header=self._header_row, index_col=self._axial_index_col)
+        else:
+            raise ValueError("Unsupported file format. Please provide a .csv or .xlsx file.")
+        
+        # Re-orient the DataFrame if is_column_oriented is False
+        if not self._is_column_oriented:
+            self._df = self._df.T.reset_index(drop=True)
+        
+        # Check if there are strings in the DataFrame header row
+        if any([isinstance(col, str) for col in self._df.columns.to_list()]):
+            # Save the header row as a list that can be accessed later
+            self._config['header_row'] = self._df.columns.to_list()
+            # Assign the first row (header row) as the column values and drop the first row from the DataFrame
+            self._df.columns = self._df.iloc[0]
+            self._df = self._df.drop(self._df.iloc[0]).reset_index(drop=True)
+            # Check that there is no missing values in the header row. If there are, raise an error.
+            if any(["Unnamed" in col for col in self._df.columns.to_list()]):
+                raise ValueError("Missing values detected in the header row. Please specify the correct header_row index.")
+            
+        # Check that the axial displacement column has no missing values. If there are, raise an error.
+        if self._axial_index_col is not None and self._df.index.isna().any():
+            # Trim the index to remove any leading or trailing NaN values
+            print("Warning: Missing values detected in the axial displacement column. Attempting to remove these rows.")
+            self._df = self._df[self._df.index.notna()]
+        
+        # Check that axial displacement values are numeric and in ascending order
+        try:
+            self._df.index = self._df.index.astype(float)
+        except ValueError:
+            raise ValueError("Non-numeric values detected in the axial displacement column. Please ensure all values are numeric.")
+        if not self._df.index.is_monotonic_increasing:
+            raise ValueError("Axial displacement values are not in ascending order. Please ensure the axial displacement column is sorted in ascending order.")
+
+        # Drop rows and columns if specified
+        if self._last_column is not None:
+            self._df = self._df.iloc[:, :self._last_column + 1]
+        if self._last_row is not None:
+            self._df = self._df.iloc[:self._last_row + 1, :]
+        
+        # Check for any missing or na values. If found, attempt to detect the shape of the DataFrame.
+        if self._df.isna().any().any():
+            # Warn the user that it will attempt to detect the shape of the DataFrame
+            print("Warning: Missing values detected in the DataFrame. Attempting to detect the correct shape of the DataFrame.")
+            self._detect_shape()
+
+        # Check that the current orientation is correct: [rows x columns] = [axial x circumferential]
+        if self._df.shape[0] < self._df.shape[1]:
+            raise ValueError("DataFrame orientation is incorrect. Please set orientation_col to True or False accordingly. There should be more axial rows than circumferential (caliper) columns.")
+        
+        # Assign axial displacement values as index
+        if self._axial_index_col is None:
+            # If axial_index_col is None, assume the first column is axial displacement
+            self._df.index = self._df.iloc[:, 0].astype(float)
+            self._df.drop(self._df.columns[0], axis=1, inplace=True)
+            # Confirm that axial displacement values are in ascending order
+            if not self._df.index.is_monotonic_increasing:
+                raise ValueError(f"Axial displacement values (using the first {'column' if self._is_column_oriented else 'row'}) are not in ascending order. Please ensure the axial displacement {'column' if self._is_column_oriented else 'row'} is sorted in ascending order.")
+            
+        # Convert all data to float type
+        try:
+            self._df = self._df.astype(float)
+        except ValueError:
+            raise ValueError("Non-numeric values detected in the DataFrame. Please ensure all radial values are numeric.")
+        
+        # Check the units
+        if self._unit_radial == 'mm':
+            # Convert the radial values from metric to imperial
+            self._df = self._df * 0.0393701  # Convert from mm to inches
+        elif self._unit_radial != 'in':
+            raise ValueError("Unsupported unit_radial. Please use 'in' for inches or 'mm' for millimeters.")
+        
+        if self._unit_axial == 'm':
+            # Convert the axial displacement index from metric to imperial
+            self._df.index = np.array([39.3701 * (x - self._df.index[0]) for x in self._df.index])   # Convert from m to relative inches (starting from 0)
+        elif self._unit_axial == 'ft':
+            # Convert the axial displacement index from feet to inches
+            self._df.index = np.array([12 * (x - self._df.index[0]) for x in self._df.index])  # Convert from ft to relative inches (starting from 0)
+        elif self._unit_axial == 'mm':
+            # Convert the axial displacement index from mm to inches
+            self._df.index = np.array([0.0393701 * (x - self._df.index[0]) for x in self._df.index])   # Convert from mm to relative inches (starting from 0)
+        elif self._unit_axial == 'in':
+            # Convert the axial displacement index from inches to relative inches
+            self._df.index = np.array([x - self._df.index[0] for x in self._df.index])   # Convert from in to relative inches (starting from 0)
+        else:
+            raise ValueError("Unsupported unit_axial. Please use either 'ft', 'm', 'mm', or 'in'.")
+
+        # Check for outlier columns. These may contain different metadata (e.g., internal radius, orientation, etc.). Remove these columns but warn the user.
+        col_means = self._df.mean()
+        overall_mean = col_means.mean()
+        col_std = col_means.std()
+        outlier_threshold = 3 * col_std
+        outlier_cols = col_means[(col_means - overall_mean).abs() > outlier_threshold].index.tolist()
+        if outlier_cols:
+            print(f"Warning: Detected outlier column(s) {outlier_cols} based on mean radial values. These column(s) will be removed from the DataFrame.")
+            self._df.drop(columns=outlier_cols, axis=1, inplace=True)
+            self._config['outlier_columns'] = outlier_cols
+
+        # Check if the number of columns matches the caliper_count if provided
+        if caliper_count is not None:
+            if self._df.shape[1] != caliper_count:
+                raise ValueError(f"Number of columns in DataFrame ({self._df.shape[1]}) does not match the provided caliper_count ({caliper_count}). Please check the data or adjust the caliper_count parameter.")
+
+        # Check the data type
+        if self._value_type == 'absolute':
+            # Check that there are no negative values in the DataFrame
+            if (self._df < 0).any().any():
+                raise ValueError("Negative values detected in the DataFrame, but value_type is set to 'absolute'. Please ensure all radial values are absolute internal radius measurements.")
+        elif self._value_type == 'relative':
+            # Convert absolute internal radius measurements to relative radial values
+            nominal_IR = (self._OD / 2) - self._WT
+            self._df = self._df.map(lambda x: nominal_IR + x)
+
+    @property
+    def df(self):
+        """
+        Get the processed DataFrame.
+
+        Returns
+        -------
+        pd.DataFrame
+            The processed DataFrame with axial displacements as index and circumferential positions as columns.
+        """
+        return self._df
+    
+    def plot(self):
+        """
+        Plot the radial data as a contour map.
+        """
+        import matplotlib.pyplot as plt
+
+        plt.figure(figsize=(12, 6))
+        plt.contourf(self._df.index, np.arange(0, self._df.shape[1]), self._df.T, levels=100, cmap='viridis')
+        plt.colorbar(label='Radial Value (in)')
+        plt.xlabel('Axial Displacement (in)')
+        plt.ylabel('Circumferential Position (Caliper Number)')
+        plt.title('Radial Data Contour Map')
+        plt.show()
+
+    def _detect_shape(self):
+        """
+        Detect the shape of the DataFrame to determine last row and column if not provided.
+        """
+        # Iterate through values to find last column and row with numeric data
+        def is_float(value):
+            if value is None:
+                return False
+            try:
+                float(value)
+                return True
+            except (ValueError, TypeError):
+                return False
+        row_lengths = []
+        col_lengths = []
+        for _, row in enumerate(self._df.values):
+            # Sum up the number of numeric values in the row
+            numeric_count = 0
+            for val in row:
+                if is_float(val) and not pd.isna(val):
+                    numeric_count += 1
+            row_lengths.append(numeric_count)
+
+        for _, col in enumerate(self._df.values.T):
+            # Sum up the number of numeric values in the column
+            numeric_count = 0
+            for val in col:
+                if is_float(val) and not pd.isna(val):
+                    numeric_count += 1
+            col_lengths.append(numeric_count)
+
+        # Use the most common length as the row and column length
+        row_length = max(set(row_lengths), key=row_lengths.count)
+        col_length = max(set(col_lengths), key=col_lengths.count)
+        # Get the first index of matching value in row_lengths and col_lengths
+        first_row_index = row_lengths.index(row_length)
+        first_col_index = col_lengths.index(col_length)
+        # Get the last row and column index based on the last occurrence of the matching value
+        last_row_index = len(row_lengths) - 1 - row_lengths[::-1].index(row_length)
+        last_col_index = len(col_lengths) - 1 - col_lengths[::-1].index(col_length)
+        # Trim the DataFrame to the detected shape
+        self._df = self._df.iloc[first_row_index:last_row_index + 1, first_col_index:last_col_index + 1].reset_index(drop=True)
+        # Save the detected shape in the config
+        self._config['row_range'] = [first_row_index, last_row_index]
+        self._config['col_range'] = [first_col_index, last_col_index]
+        print(f"Detected DataFrame shape: rows {self._config['row_range']}, columns {self._config['col_range']}.")
+
 class Process:
     def __init__(self, rd_path, ILI_format, OD, WT, SMYS, filename):
         """
