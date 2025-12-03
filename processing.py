@@ -18,7 +18,7 @@ basePath = ''
 
 class DataLoader:
     def __init__(self, 
-                 file_path: str, 
+                 file_path, 
                  OD: float, 
                  WT: float, 
                  caliper_count: int | None = None,
@@ -36,7 +36,7 @@ class DataLoader:
 
         Parameters
         ----------
-        file_path : str
+        file_path : PathLike | io.StringIO
             Path to the data file.
         OD : float
             Outside diameter measurement, in.
@@ -277,13 +277,13 @@ class DataLoader:
         print(f"Detected DataFrame shape: rows {self._config['row_range']}, columns {self._config['col_range']}.")
 
 class Process:
-    def __init__(self, rd_path:str | io.StringIO, OD:float, WT:float, SMYS:float, **kwargs):
+    def __init__(self, rd_path, OD:float, WT:float, SMYS:float, **kwargs):
         """
         Import data in the desired ILI format. Below are a list of recognized ILI formats.
 
         Parameters
         ----------
-        rd_path : string | io.StringIO
+        rd_path : PathLike | io.StringIO
             the location of the feature of interest or a StringIO object containing the data
         OD : float
             the outside diameter measurement, in.
@@ -828,12 +828,13 @@ if __name__ == "__main__":
         p = Process(rd_path, args.OD, args.WT, args.SMYS)
         p.smooth_data(args.circ_int, args.axial_int, args.circ_window, args.circ_smooth, args.axial_window, args.axial_smooth)
         p.calculate_strain(d=0.1, L=3)
-    elif (args.type == 'strain'):
-        p = Process(rd_path, args.ILI_format, args.OD, args.WT, args.SMYS, args.filename)
-        p.smooth_data(args.circ_int, args.axial_int, args.circ_window, args.circ_smooth, args.axial_window, args.axial_smooth)
-        p.calculate_strain(d=0.1, L=3)
+    # This is commented out for now since strain calculation is done after smoothing
+    # elif (args.type == 'strain'):
+    #     p = Process(rd_path, args.OD, args.WT, args.SMYS)
+    #     p.smooth_data(args.circ_int, args.axial_int, args.circ_window, args.circ_smooth, args.axial_window, args.axial_smooth)
+    #     p.calculate_strain(d=0.1, L=3)
     elif (args.type == 'input'):
-        p = Process(rd_path, args.ILI_format, args.OD, args.WT, args.SMYS, args.filename)
+        p = Process(rd_path, args.OD, args.WT, args.SMYS)
         p.create_input_file(basePath + '/storage/app/private/data/results_' + args.filename, basePath + '/python/templates/')
     else:
-        p = Process(rd_path, args.ILI_format, args.OD, args.WT, args.SMYS, args.filename)
+        p = Process(rd_path, args.OD, args.WT, args.SMYS)
