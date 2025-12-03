@@ -16,364 +16,6 @@ from scipy.interpolate import griddata
 
 basePath = ''
 
-def collect_raw_data_v1(rd_path):
-    # Vendor 1
-    # Works with: Baker Hughes, Enduro, Onestream, Quest, and Rosen
-
-    # Data is all in Column A with delimiter ';' with 12 header rows that need to
-    # be removed before accessing the actual data
-    rd_axial_row = 12  # Row 13 = Index 12
-    rd_drop_tail = 2
-    rd = pd.read_csv(rd_path, header=None)
-    # Drop the first set of rows that are not being used
-    rd.drop(rd.head(rd_axial_row).index, inplace=True)
-    # Drop the last two rows that are not being used
-    rd.drop(rd.tail(rd_drop_tail).index, inplace=True)
-    rd = rd[0].str.split(';', expand=True)
-    rd = rd.apply(lambda x: x.str.strip())
-    # Drop the last column since it is empty
-    rd.drop(rd.columns[-1], axis=1, inplace=True)
-    # Relative axial positioning values
-    rd_axial = rd.loc[rd_axial_row].to_numpy()
-    # Delete the first two values which are 'Offset' and '(ft)'
-    rd_axial = np.delete(rd_axial, [0,1])
-    rd_axial = rd_axial.astype(float)
-    # Convert the axial values to inches
-    rd_axial = rd_axial*12
-    # Drop the two top rows: Offset and Radius
-    rd.drop(rd.head(2).index, inplace=True)
-    # Circumferential positioning in [degrees]
-    rd_circ = rd[0].to_numpy()
-    # Convert from clock to degrees
-    rd_circ = [x.split(':') for x in rd_circ]
-    rd_circ = [round((float(x[0]) + float(x[1])/60)*360/12,1) for x in rd_circ]
-    rd_circ = np.array(rd_circ)
-    # Drop the two first columns: Circumferential in o'Clock and in Length inches
-    rd.drop(rd.columns[[0,1]], axis=1, inplace=True)
-    # Collect radial values and make sure to transpose so that [r x c] = [axial x circ]
-    rd_radius = rd.to_numpy().astype(float).T
-
-    return rd_axial, rd_circ, rd_radius
-
-def collect_raw_data_v2(rd_path):
-    # Vendor 2
-    # Works with:
-
-    rd = pd.read_csv(rd_path, header=None)
-    # Axial values are in row direction
-    rd_axial = rd[0].to_numpy().astype(float)
-    rd_axial = np.delete(rd_axial, 0)
-    # Convert ft values to relative inches
-    rd_axial = [12*(x - rd_axial[0]) for x in rd_axial]
-    rd_axial = np.array(rd_axial)
-    # Circumferential positioning as caliper number in column direction
-    rd_circ = rd.loc[0].to_numpy().astype(float)
-    rd_circ = np.delete(rd_circ, 0)
-    # Since circumferential positioning may not be in the numerical order
-    rd_circ = np.arange(0, len(rd_circ))
-    # Convert from number to degrees
-    rd_circ = [(x*360/len(rd_circ)) for x in rd_circ]
-    rd_circ = np.array(rd_circ)
-    # Drop the first row and column
-    rd.drop(rd.head(1).index, inplace=True)
-    rd.drop(rd.columns[0], axis=1, inplace=True)
-    # Collect radial values and make sure to transpose so that [r x c] = [circ x axial]
-    # Make the data negative since it is reading in the opposite direction
-    rd_radius = -rd.to_numpy().astype(float)
-    return rd_axial, rd_circ, rd_radius
-
-def collect_raw_data_v3(rd_path, IR):
-    # Vendor 3
-    # Works with: TDW
-
-    rd = pd.read_csv(rd_path, header=None)
-    # Drop any columns with 'NaN' trailing at the end
-    rd.dropna(axis=1, how='all', inplace=True)
-    # Drop any columns with ' ' trailing at the end
-    if rd.iloc[0][rd.columns[-1]] == ' ':
-        rd.drop(columns=rd.columns[-1], axis=1, inplace=True)
-    # First row gives the original orientation of each sensor, starting from the second column
-    rd_circ = rd.iloc[0][1:].to_numpy().astype(float)
-    # Since the orientation values are not incremental, will need to roll the data to have the smallest angle starting
-    roll_amount = len(rd_circ) - np.argmin(rd_circ)
-    rd_circ = np.roll(rd_circ, roll_amount)
-    # Drop the first three rows
-    rd.drop(rd.head(3).index, inplace=True)
-    # Axial values are in row direction, starting from row 4 (delete first 3 rows)
-    rd_axial = rd[0].to_numpy().astype(float)
-    # Convert ft values to relative inches
-    rd_axial = [12*(x - rd_axial[0]) for x in rd_axial]
-    rd_axial = np.array(rd_axial)
-    # Drop the first column
-    rd.drop(rd.columns[0], axis=1, inplace=True)
-    # Collect radial values
-    rd_radius = rd.to_numpy().astype(float)
-    # Also need to roll the ROWS in rd_radius since the circumferential orientation was rolled
-    rd_radius = np.roll(rd_radius, roll_amount, axis=0)
-    # The radial data needs to be the difference form the nominal radius
-    # Anything negative means IN and positive means OUT
-    # rd_radius = rd_radius - IR
-    rd_radius = rd_radius
-    return rd_axial, rd_circ, rd_radius
-
-def collect_raw_data_v4(rd_path, IR):
-    # Vendor 4
-    # Works with: Entegra
-
-    rd = pd.read_csv(rd_path, header=None, dtype=float)
-    # Drop any columns and rows with 'NaN' trailing at the end
-    rd = rd.dropna(axis=1, how='all')
-    rd = rd.dropna(axis=0, how='all')
-    # Axial values are in column direction, starting from column B (delete first column)
-    rd_axial = rd.loc[0][1:].to_numpy().astype(float)
-    # Convert ft values to relative inches
-    rd_axial = [12*(x - rd_axial[0]) for x in rd_axial]
-    rd_axial = np.array(rd_axial)
-    # Circumferential positioning as caliper number in column
-    # Start from 2 since first row is Distance
-    rd_circ = rd[0][1:].to_numpy().astype(float)
-    # Since circumferential positioning may not be in the numerical order
-    rd_circ = np.arange(0, len(rd_circ))
-    # Convert from number to degrees
-    rd_circ = [(x*360/len(rd_circ)) for x in rd_circ]
-    rd_circ = np.array(rd_circ)
-    # Drop the first column and row
-    rd.drop(rd.columns[0], axis=1, inplace=True)
-    rd.drop(rd.head(1).index, axis=0, inplace=True)
-    # Collect radial values and make sure to transpose so that [r x c] = [axial x circ]
-    rd_radius = rd.to_numpy().astype(float).T
-    # The radial data needs to be the difference form the nominal radius
-    # Anything negative means IN and positive means OUT
-    # rd_radius = rd_radius - IR
-    # rd_radius = rd_radius
-    return rd_axial, rd_circ, rd_radius
-
-def collect_raw_data_v5(rd_path, IR):
-    # Vendor 5 (created on 09/19/2022)
-    # Works with: TDW (similar to original TDW, minus rows 2 and 3)
-
-    rd = pd.read_csv(rd_path, header=None)
-    # Drop any columns with 'NaN' trailing at the end
-    rd.dropna(axis=1, how='all', inplace=True)
-    # Drop any columns with ' ' trailing at the end
-    if rd.iloc[0][rd.columns[-1]] == ' ':
-        rd.drop(columns=rd.columns[-1], axis=1, inplace=True)
-    # First row gives the original orientation of each sensor, starting from the second column
-    rd_circ = rd.iloc[0][1:].to_numpy().astype(float)
-    # Since the orientation values are not incremental, will need to roll the data to have the smallest angle starting
-    roll_amount = len(rd_circ) - np.argmin(rd_circ)
-    rd_circ = np.roll(rd_circ, roll_amount)
-    # Drop the first row
-    rd.drop(rd.head(1).index, inplace=True)
-    # Axial values are in row direction, starting from row 2 (delete first 1 row)
-    rd_axial = rd[0].to_numpy().astype(float)
-    # Convert ft values to relative inches
-    rd_axial = [12*(x - rd_axial[0]) for x in rd_axial]
-    rd_axial = np.array(rd_axial)
-    # Drop the first column
-    rd.drop(rd.columns[0], axis=1, inplace=True)
-    # Collect radial values
-    rd_radius = rd.to_numpy().astype(float)
-    # Also need to roll the ROWS in rd_radius since the circumferential orientation was rolled
-    rd_radius = np.roll(rd_radius, roll_amount, axis=0)
-    # The radial data needs to be the difference form the nominal radius
-    # Anything negative means IN and positive means OUT
-    rd_radius = rd_radius
-    return rd_axial, rd_circ, rd_radius
-
-def collect_raw_data_v6(rd_path):
-    # Vendor 6 (created on 10/21/2022)
-    # Works with: PBF
-
-    # Data has Orientation (oclock) in Horizontal direction starting from B2.
-    # Axial information is in Vertical direction, starting from A3
-    # Radial values are the IR values
-    # Collect raw data and delete the first row
-    rd = pd.read_csv(rd_path, header=None, skiprows=1)
-    # New first row gives the original orientation of each sensor in oclock, starting from the second column (B)
-    rd_circ = rd.iloc[0][1:].to_numpy()
-    # Convert from clock to degrees. There are oclock using 12 instead of 0, therefore need to adjust
-    rd_circ = [x.split(':') for x in rd_circ]
-    rd_circ = [(float(x[0]) * 60 + float(x[1]))/2 for x in rd_circ]
-    for i, val in enumerate(rd_circ):
-        if val > 360:
-            rd_circ[i] = val - 360
-    rd_circ = np.array(rd_circ)
-    # Since the orientation values are not incremental, will need to roll the data to have the smallest angle starting
-    roll_amount = len(rd_circ) - np.argmin(rd_circ)
-    rd_circ = np.roll(rd_circ, roll_amount)
-    # Drop the first row
-    rd.drop(rd.head(1).index, inplace=True)
-    # Axial values are in the column direction, starting from A3
-    rd_axial = rd[0].to_numpy().astype(float)
-    # Convert ft values to relative inches
-    rd_axial = [12*(x - rd_axial[0]) for x in rd_axial]
-    rd_axial = np.array(rd_axial)
-    # Drop the first column
-    rd.drop(rd.columns[0], axis=1, inplace=True)
-    # Collect radial values
-    rd_radius = rd.to_numpy().astype(float)
-    # Also need to roll the COLUMNS (axis=1) in rd_radius since the circumferential orientation was rolled
-    rd_radius = np.roll(rd_radius, roll_amount, axis=1)
-    return rd_axial, rd_circ, rd_radius
-
-def collect_raw_data_v7(rd_path):
-    # Vendor 7 (created on 04/11/2024)
-    # Works with: Southern Company
-
-    # Axial position (m) is in vertical direction, starting at A2
-    # There is no Circumferential position or caliper number
-    # Internal radial values (mm) start at C2
-    rd = pd.read_csv(rd_path, header=None, dtype=float, skiprows=1)
-    # Drop column B (index=1) since it is not being used
-    rd.drop(rd.columns[1], axis=1, inplace=True)
-    # Drop any columns and rows with 'NaN' trailing at the end
-    rd = rd.dropna(axis=1, how='all')
-    rd = rd.dropna(axis=0, how='all')
-    # Axial values are in COLUMN direction
-    rd_axial = rd.loc[0:][0].to_numpy().astype(float)
-    # Convert (m) values to relative inches (in)
-    rd_axial = [39.3701 * (x - rd_axial[0]) for x in rd_axial]
-    rd_axial = np.array(rd_axial)
-    # Circumferential positioning based on number of caliper data columns
-    # Ignore the Axial values column
-    rd_circ = np.arange(0, len(rd.loc[0][1:]))
-    # Convert from number to degrees
-    rd_circ = [(x*360/len(rd_circ)) for x in rd_circ]
-    rd_circ = np.array(rd_circ)
-    # Drop the first column
-    rd.drop(rd.columns[0], axis=1, inplace=True)
-    # Collect radial values
-    # Important: Data structure needs to be [r x c] = [axial x circ]
-    rd_radius = rd.to_numpy().astype(float)
-    # Convert from (mm) to (in)
-    rd_radius = rd_radius * 0.0393701
-    return rd_axial, rd_circ, rd_radius
-
-def collect_raw_data_v8(rd_path):
-    # Vendor 8
-    # Works with: Campos
-
-    rd = pd.read_excel(rd_path, header=None)
-    # Drop any columns and rows with 'NaN' trailing at the end
-    rd = rd.dropna(axis=1, how='all')
-    rd = rd.dropna(axis=0, how='all')
-    # Axial values are in column direction, starting from column B (delete first column)
-    rd_axial = rd.loc[0][1:].to_numpy().astype(float)
-    # Convert ft values to relative inches
-    rd_axial = [12*(x - rd_axial[0]) for x in rd_axial]
-    rd_axial = np.array(rd_axial)
-    # Circumferential positioning as caliper number in column
-    # Start from 2 since first row is Distance
-    # rd_circ = rd[0][1:].to_numpy().astype(float)
-    rd_circ = rd[0][1:]
-    # Since circumferential positioning may not be in the numerical order
-    rd_circ = np.arange(0, len(rd_circ))
-    # Convert from number to degrees
-    rd_circ = [(x*360/len(rd_circ)) for x in rd_circ]
-    rd_circ = np.array(rd_circ)
-    # Drop the first column and row
-    rd.drop(rd.columns[0], axis=1, inplace=True)
-    rd.drop(rd.head(1).index, axis=0, inplace=True)
-    # Collect radial values and make sure to transpose so that [r x c] = [axial x circ]
-    rd_radius = rd.to_numpy().astype(float).T
-    # Convert from mm to inches
-    rd_radius = rd_radius / 25.4
-    return rd_axial, rd_circ, rd_radius
-
-def collect_raw_data_v9(rd_path):
-    # Vendor 9
-    # Works with: Creaform Scan
-
-    rd = pd.read_csv(rd_path, header=None)
-    # Drop any columns and rows with 'NaN' trailing at the end
-    rd = rd.dropna(axis=1, how='all')
-    rd = rd.dropna(axis=0, how='all')
-    # Axial values are in column direction, starting from column B (delete first column)
-    rd_axial = rd.loc[0][1:].to_numpy().astype(float)
-    # Circumferential values (deg) are in row direction, starting from row 2 (delete first row)
-    rd_circ = rd.loc[1:][0].to_numpy().astype(float)
-    # Drop the first column and row
-    rd.drop(rd.columns[0], axis=1, inplace=True)
-    rd.drop(rd.head(1).index, axis=0, inplace=True)
-    # Collect radial values and make sure to transpose so that [r x c] = [axial x circ]
-    rd_radius = rd.to_numpy().astype(float).T
-    return rd_axial, rd_circ, rd_radius
-
-def collect_raw_data_v10(rd_path):
-    # Vendor 10
-    # Works with: Rosen
-
-    # Collect raw data
-    rd = pd.read_csv(rd_path, header=None, dtype=float, skiprows=1)
-    # Drop any columns and rows with 'NaN' trailing at the end
-    rd = rd.dropna(axis=1, how='all')
-    rd = rd.dropna(axis=0, how='all')
-    # Axial values are in column direction (delete second column)
-    rd_axial = rd.loc[:][0].to_numpy().astype(float)
-    # Convert [m] values to relative [in]
-    rd_axial = np.array([39.3701 *(x - rd_axial[0]) for x in rd_axial])
-    # Drop columns A and B
-    rd.drop(rd.columns[0], axis=1, inplace=True)
-    rd.drop(rd.columns[0], axis=1, inplace=True)
-    # Circumferential positioning as caliper number in column
-    # Start from 2 since first row is Distance
-    rd_circ = rd.loc[0].to_numpy().astype(float)
-    # Since circumferential positioning may not be in the numerical order
-    rd_circ = np.arange(0, len(rd_circ))
-    # Convert from number to degrees
-    rd_circ = np.array([(x*360/len(rd_circ)) for x in rd_circ])
-    # Collect radial values and make sure that [r x c] = [axial x circ]
-    rd_radius = rd.to_numpy().astype(float)
-    # Convert from [mm] to [in]
-    rd_radius = rd_radius / 25.4
-    return rd_axial, rd_circ, rd_radius
-
-def collect_raw_data_v11(rd_path):
-    # Vendor 11
-    # Works with: KS12
-
-    # Collect raw data
-    rd = pd.read_csv(rd_path, header=0, dtype=float)
-    # Column index 82 contains continuous measurements of internal radius (IR) in mm
-    IR = rd.iloc[:, 82] / 25.4  # Convert from mm to inches
-    # Drop columns after column index 80
-    rd.drop(rd.columns[81:], axis=1, inplace=True)
-    # Make the first column the axial values (convert from meters to relative inches), and drop the first column
-    rd_axial = rd[rd.columns[0]].to_numpy().astype(float) * 3.28084 * 12
-    rd_axial = rd_axial - rd_axial[0]
-    rd.drop(rd.columns[0], axis=1, inplace=True)
-    # Extract the Caliper Number from the column headers, format is "Deflection XX (mm)"
-    rd_caliper = [int(col.split(' ')[1]) for col in rd.columns]
-    # Convert from caliper number to degrees, but in numerical order
-    rd_circ = np.array([(x*360/len(rd_caliper)) for x in range(len(rd_caliper))])
-    # Collect the radial values, convert from mm to inches, and ensure that the data structure is [r x c] = [axial x circ]
-    rd_radius = rd.to_numpy().astype(float) / 25.4  # Convert from mm to inches
-    # Adjust each row of rd_radius by adding the IR value to the negative of rd_radius (values are negative direction)
-    for i in range(rd_radius.shape[0]):
-        rd_radius[i, :] = -rd_radius[i, :] + IR[i]
-    return rd_axial, rd_circ, rd_radius
-
-def collect_raw_data_v12(rd_path):
-    # Vendor 12
-    # Works with: KS1314
-
-    # Collect raw data
-    with open(rd_path, 'rb') as f:
-        rd = pd.read_excel(f, header=0, dtype=float, engine='calamine')
-    # Column index 0 contains the axial values (convert from mm to relative inches), and drop the first column
-    rd_axial = rd[rd.columns[0]].to_numpy().astype(float) * 0.0393701  # Convert from mm to inches
-    rd_axial = rd_axial - rd_axial[0]
-    rd.drop(rd.columns[0], axis=1, inplace=True)
-    # Extract the circumferential degrees from the column headers
-    rd_circ = rd.columns.to_numpy().astype(float)
-    # Confirm that values in rd_circ are in incremental order, otherwise, redetermine the values based on the number of columns
-    if not np.all(np.diff(rd_circ) > 0):
-        rd_circ = np.linspace(0, 360, num=rd.shape[1], endpoint=False)
-    # Collect the radial values, convert from mm to inches, and ensure that the data structure is [r x c] = [axial x circ]
-    rd_radius = rd.to_numpy().astype(float) / 25.4  # Convert from mm to inches
-    return rd_axial, rd_circ, rd_radius
-
 class DataLoader:
     def __init__(self, 
                  file_path: str, 
@@ -635,18 +277,21 @@ class DataLoader:
         print(f"Detected DataFrame shape: rows {self._config['row_range']}, columns {self._config['col_range']}.")
 
 class Process:
-    def __init__(self, rd_path, ILI_format, OD, WT, SMYS, filename):
+    def __init__(self, rd_path:str | io.StringIO, OD:float, WT:float, SMYS:float, **kwargs):
         """
         Import data in the desired ILI format. Below are a list of recognized ILI formats.
 
         Parameters
         ----------
-        rd_path : string
-            the location of the feature of interest
-        ILI_format : string
-            the desired ILI format that corresponds to the feature of interest
+        rd_path : string | io.StringIO
+            the location of the feature of interest or a StringIO object containing the data
         OD : float
-            the outside diameter measurement, in
+            the outside diameter measurement, in.
+        WT : float
+            the wall thickness measurement, in.
+        SMYS : float
+            the specified minimum yield strength, psi.
+        
         Outputs
         ----------
         o_axial & f_axial : array of floats
@@ -656,52 +301,19 @@ class Process:
         o_radius & f_radius : array of floats
             2-D array containing the radial values with shape (axial x circ), in
         """
-        # self.name = rd_path.split('/')[-1].split('.')[0]    # Get the filename
-        self.name = filename.split('.')[0]
+        self.name = os.path.splitext(os.path.basename(rd_path))[0]
         self.path = rd_path
-        self.ILI_format = str(ILI_format)
         self.OD = OD
         self.WT = WT
         self.SMYS = SMYS
         self.input_file = False
 
-        ILI_format_list = ['Baker Hughes', 'Enduro', 'Entegra', 'Onestream', 'Quest',
-                           'Rosen', 'TDW', 'TDW (v2)', 'PBF', 'Campos', 'Southern', 'Creaform']
-
-        # Load the raw data information
-        if ILI_format.lower() == 'baker hughes':
-            rd_axial, rd_circ, rd_radius = collect_raw_data_v1(rd_path)
-        elif ILI_format.lower() == 'enduro':
-            rd_axial, rd_circ, rd_radius = collect_raw_data_v1(rd_path)
-        elif ILI_format.lower() == 'entegra':
-            rd_axial, rd_circ, rd_radius = collect_raw_data_v4(rd_path, OD/2)
-        elif ILI_format.lower() == 'onestream':
-            rd_axial, rd_circ, rd_radius = collect_raw_data_v1(rd_path)
-        elif ILI_format.lower() == 'quest':
-            rd_axial, rd_circ, rd_radius = collect_raw_data_v1(rd_path)
-        elif ILI_format.lower() == 'rosen':
-            rd_axial, rd_circ, rd_radius = collect_raw_data_v1(rd_path)
-        elif ILI_format.lower() == 'tdw':
-            rd_axial, rd_circ, rd_radius = collect_raw_data_v3(rd_path, OD/2)
-        elif ILI_format.lower() == 'tdw2':
-            rd_axial, rd_circ, rd_radius = collect_raw_data_v5(rd_path, OD/2)
-        elif ILI_format.lower() == 'pbf':
-            rd_axial, rd_circ, rd_radius = collect_raw_data_v6(rd_path)
-        elif ILI_format.lower() == 'campos':
-            rd_axial, rd_circ, rd_radius = collect_raw_data_v8(rd_path)
-        elif ILI_format.lower() == 'southern':
-            rd_axial, rd_circ, rd_radius = collect_raw_data_v7(rd_path)
-        elif ILI_format.lower() == 'creaform':
-            rd_axial, rd_circ, rd_radius = collect_raw_data_v9(rd_path)
-        elif ILI_format.lower() == 'rosen2':
-            rd_axial, rd_circ, rd_radius = collect_raw_data_v10(rd_path)
-        elif ILI_format.lower() == 'ks12':
-            rd_axial, rd_circ, rd_radius = collect_raw_data_v11(rd_path)
-        elif ILI_format.lower() == 'ks1314':
-            rd_axial, rd_circ, rd_radius = collect_raw_data_v12(rd_path)
-        else:
-            raise Exception('ILI format %s was not found. Use one of the following: %s' % (ILI_format, ', '.join(ILI_format_list)))
-
+        # Create a DataLoader instance to process the raw data file
+        df = DataLoader(self.path, self.OD, self.WT, **kwargs).df
+        rd_axial = df.index.to_numpy()
+        rd_circ = df.columns.to_numpy()
+        rd_radius = df.to_numpy()
+        
         # Keep the original
         self.o_axial = rd_axial
         self.o_circ = rd_circ
@@ -1185,11 +797,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process a data file")
     parser.add_argument("type", type=str)
     parser.add_argument("path", type=str)
-    parser.add_argument("ILI_format", type=str)
     parser.add_argument("OD", type=float)
     parser.add_argument("WT", type=float)
     parser.add_argument("SMYS", type=float)
-    parser.add_argument("filename", type=str)
 
     parser.add_argument("--circ_int", type=float)
     parser.add_argument("--axial_int", type=float)
@@ -1215,7 +825,7 @@ if __name__ == "__main__":
     rd_path = io.StringIO(file_contents.decode("utf-8"))  # decode bytes to string
 
     if (args.type == 'smooth'):
-        p = Process(rd_path, args.ILI_format, args.OD, args.WT, args.SMYS, args.filename)
+        p = Process(rd_path, args.OD, args.WT, args.SMYS)
         p.smooth_data(args.circ_int, args.axial_int, args.circ_window, args.circ_smooth, args.axial_window, args.axial_smooth)
         p.calculate_strain(d=0.1, L=3)
     elif (args.type == 'strain'):
